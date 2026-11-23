@@ -1,0 +1,4 @@
+# design_diff.py、design_ir.py（--png）、design_measure.py 需要
+Pillow>=10
+# 仅 design_diff.py 需要
+numpy>=1.26

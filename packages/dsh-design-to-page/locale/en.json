@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Design to page",
+    "description": "Turn design exports into maintainable pages with a measurable pixel loop: parse the annotation JSON into a layout IR, screenshot the running page through CDP, diff at the design's native 2x, and measure crops and colors. Includes grid/flex inference with evidence and confidence, component clustering, image-slot masks, hidden-layer detection, and a diff gate.",
+    "detail": "docs/DETAIL.en.md"
+  }
+}

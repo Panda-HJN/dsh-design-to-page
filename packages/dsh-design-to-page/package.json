@@ -1,0 +1,54 @@
+{
+  "name": "dsh-design-to-page",
+  "version": "0.0.1",
+  "description": "Design-to-page tools for DeepSeek Harness: annotation JSON to layout IR, CDP screenshots, native-2x pixel diff, and design measurements.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "scripts/*.py",
+    "scripts/*.mjs",
+    "skill",
+    "locale/*.json",
+    "docs",
+    "icon.svg",
+    "README.md",
+    "LICENSE",
+    "requirements.txt"
+  ],
+  "author": "Panda-HJN",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Panda-HJN/dsh-design-to-page.git",
+    "directory": "packages/dsh-design-to-page"
+  },
+  "homepage": "https://github.com/Panda-HJN/dsh-design-to-page#readme",
+  "bugs": {
+    "url": "https://github.com/Panda-HJN/dsh-design-to-page/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "design-to-code",
+    "pixel-diff",
+    "playwright-free",
+    "cdp",
+    "screenshot",
+    "layout-inference"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
