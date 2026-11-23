@@ -39,7 +39,11 @@ packages/dsh-design-to-page/    the npm package and DSH bundle
   scripts/                      Python and Node implementations
   skill/SKILL.md                agent playbook
   docs/                         usage, contract, limits
+examples/bare-scaffold/         empty Vite + Vue + Tailwind + Element Plus project
 ```
+
+The scaffold is deliberately empty: it ships no design files, no brand assets and no business copy.
+Restored pages live in your own project, not in this repository.
 
 ## License
 

@@ -1,0 +1,19 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+
+# design-to-page run artifacts
+design-ir/
+*.tgz
+
+# python
+__pycache__/
+*.pyc
+
+# os / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
