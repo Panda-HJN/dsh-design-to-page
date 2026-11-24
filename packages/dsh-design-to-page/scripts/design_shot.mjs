@@ -6,17 +6,17 @@
  *
  * 用法：
  *   node scripts/design_shot.mjs --url=http://localhost:3000/example/page \
- *     --out=design-ir/shot.png --width=1920 --height=1080 --dpr=2 \
+ *     --out=design-ir/shot.png --width=1920 --height=2639 --dpr=2 \
  *     [--clip=x,y,w,h] [--wait=800] [--browser="C:\...\msedge.exe"] [--json=design-ir/shot.json]
  *
  * 输出：PNG + JSON（最终 URL、viewport、scrollHeight、phantomScrollbar、[data-slot] 矩形、box 采集）
  */
 import { spawn } from 'node:child_process'
-import { mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs'
+import { mkdirSync, writeFileSync, existsSync, rmSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 
-const MULTI = new Set(['select', 'block', 'region', 'mask'])
+const MULTI = new Set(['select', 'block'])
 const args = {}
 for (const raw of process.argv.slice(2)) {
   const [k, ...v] = raw.replace(/^--/, '').split('=')
@@ -39,6 +39,8 @@ const waitMs = Number(args.wait ?? 900)
 const port = Number(args.port ?? 9333)
 const clip = args.clip ? args.clip.split(',').map(Number) : null
 const browserPath = args.browser ?? process.env.DSH_BROWSER_PATH ?? ''
+const storageState = args['storage-state'] ? resolve(String(args['storage-state'])) : null
+const blockList = [].concat(args.block ?? []).map(String)
 
 const CANDIDATES = [
   browserPath,
@@ -94,8 +96,6 @@ let ws
 let seq = 0
 const pending = new Map()
 const events = []
-let loadTimer
-let loadFallback
 
 function connect(wsUrl) {
   return new Promise((res, rej) => {
@@ -136,25 +136,57 @@ const main = async () => {
 
   await send('Page.enable')
   await send('Runtime.enable')
+  await send('Network.enable')
+  if (blockList.length) {
+    await send('Network.setBlockedURLs', { urls: blockList })
+  }
   await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: dpr, mobile: false })
 
-  const loaded = new Promise((res) => {
-    loadTimer = setInterval(() => {
-      if (events.some((e) => e.method === 'Page.loadEventFired')) {
-        clearInterval(loadTimer)
-        clearTimeout(loadFallback)
-        res()
-      }
-    }, 50)
-    // 兜底：页面一直不触发 load 也要继续；必须清掉，否则进程会被拖住 15s
-    loadFallback = setTimeout(() => {
-      clearInterval(loadTimer)
-      res()
-    }, 15000)
-  })
+  // 登录态（opt-in）：存储态格式与 Playwright storageState 一致
+  if (storageState) {
+    const state = JSON.parse(readFileSync(storageState, 'utf8').replace(/^\uFEFF/, ''))
+    const cookies = (state.cookies ?? []).map((c) => ({
+      name: c.name,
+      value: c.value,
+      domain: c.domain,
+      path: c.path || '/',
+      secure: Boolean(c.secure),
+      httpOnly: Boolean(c.httpOnly),
+      sameSite: ({ strict: 'Strict', lax: 'Lax', none: 'None' })[String(c.sameSite).toLowerCase()] ?? 'Lax',
+      ...(c.expires && c.expires > 0 ? { expires: c.expires } : {}),
+    }))
+    if (cookies.length) await send('Network.setCookies', { cookies })
+    const origins = state.origins ?? []
+    if (origins.length) {
+      // localStorage 必须在文档创建时写入，否则首屏已经渲染完了
+      const source = `(() => {
+        const data = ${JSON.stringify(origins)};
+        const hit = data.find((e) => e.origin === location.origin);
+        if (!hit) return;
+        for (const item of hit.localStorage || []) {
+          try { localStorage.setItem(item.name, item.value) } catch (e) {}
+        }
+      })()`
+      await send('Page.addScriptToEvaluateOnNewDocument', { source })
+    }
+  }
 
   await send('Page.navigate', { url })
-  await loaded
+
+  // 等 readyState=complete：比监听 Page.loadEventFired 稳，不会命中 about:blank 的 load
+  const deadline = Date.now() + 15000
+  let ready = false
+  while (Date.now() < deadline) {
+    try {
+      ready = await evaluate('document.readyState === "complete" && location.href !== "about:blank"')
+    } catch {
+      ready = false
+    }
+    if (ready) break
+    await sleep(100)
+  }
+  if (!ready) console.error('warning: page did not reach readyState=complete in 15s; capturing anyway')
+
   await sleep(waitMs)
   await evaluate('document.fonts.ready.then(() => true)')
   await sleep(200)
@@ -185,6 +217,19 @@ const main = async () => {
     }
   })()`)
 
+  // 先校验落地页，再落盘：失败时不留脏截图
+  const pathname = new URL(metrics.href).pathname
+  if (args['expect-path'] && pathname !== String(args['expect-path'])) {
+    console.error(`expect-path mismatch: got ${pathname}`)
+    process.exitCode = 4
+    return
+  }
+  if (/\/login\b/.test(pathname)) {
+    console.error('landed on /login — auth/route problem')
+    process.exitCode = 5
+    return
+  }
+
   const shot = await send('Page.captureScreenshot', {
     format: 'png',
     captureBeyondViewport: false,
@@ -193,23 +238,11 @@ const main = async () => {
 
   mkdirSync(dirname(out), { recursive: true })
   writeFileSync(out, Buffer.from(shot.data, 'base64'))
-  const report = { url, finalUrl: metrics.href, viewport: metrics.viewport, scrollHeight: metrics.scrollHeight, phantomScrollbar: metrics.phantomScrollbar, slots: metrics.slots, box: metrics.box, fonts: metrics.fonts, browser: exe, out }
+  const report = { url, finalUrl: metrics.href, title: metrics.title, viewport: metrics.viewport, scrollHeight: metrics.scrollHeight, phantomScrollbar: metrics.phantomScrollbar, slots: metrics.slots, box: metrics.box, fonts: metrics.fonts, browser: exe, out }
   writeFileSync(jsonOut, JSON.stringify(report, null, 2))
 
   const consoleErrors = events.filter((e) => e.method === 'Runtime.exceptionThrown').length
   console.log(JSON.stringify({ ...report, consoleErrors }))
-
-  if (args['expect-path']) {
-    const got = new URL(metrics.href).pathname
-    if (got !== String(args['expect-path'])) {
-      console.error(`expect-path mismatch: got ${got}`)
-      process.exitCode = 4
-    }
-  }
-  if (/\/login\b/.test(new URL(metrics.href).pathname)) {
-    console.error('landed on /login — auth/route problem')
-    process.exitCode = 5
-  }
 }
 
 main()
@@ -218,9 +251,6 @@ main()
     process.exitCode = 1
   })
   .finally(async () => {
-    // 任何路径都要清掉加载兜底定时器，否则失败时进程会被拖住 15s
-    clearInterval(loadTimer)
-    clearTimeout(loadFallback)
     try { ws?.close() } catch {}
     try { child.kill() } catch {}
     await sleep(300)

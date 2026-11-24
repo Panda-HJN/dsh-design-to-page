@@ -41,6 +41,40 @@ def _hex(c):
     return "#%02X%02X%02X" % c[:3] if c else None
 
 
+def _fills(n):
+    """保留填充的完整语义：纯色 / 线性渐变（起止点 + stops）/ 未知类型。
+
+    只留 hex 会把渐变压成 None，整页背景就丢了。
+    """
+    out = []
+    for c in (n.get("fill") or {}).get("colors") or []:
+        kind = c.get("type") or "normal"
+        v = c.get("value") or {}
+        if kind == "linearGradient":
+            stops = []
+            for st in v.get("colorStops") or []:
+                rgba = _c(st.get("color"))
+                stops.append(
+                    {
+                        "position": round(st.get("position", 0), 3),
+                        "rgba": rgba,
+                        "hex": _hex(rgba),
+                    }
+                )
+            out.append(
+                {
+                    "kind": "linearGradient",
+                    "from": [round(v.get("fromX", 0), 2), round(v.get("fromY", 0), 2)],
+                    "to": [round(v.get("toX", 0), 2), round(v.get("toY", 0), 2)],
+                    "stops": stops,
+                }
+            )
+        else:
+            rgba = _c(c)
+            out.append({"kind": "solid" if rgba else "unknown", "rgba": rgba, "hex": _hex(rgba)})
+    return out
+
+
 def _borders(n):
     out = []
     for side in (n.get("stroke") or {}).get("borders") or []:
@@ -94,22 +128,39 @@ def _texts(n):
 
 
 def normalize(raw):
-    """raw[0] 是完整嵌套树，其余是平铺副本"""
+    """根可能是「[完整树, 平铺副本...]」也可能是单个对象"""
 
     def walk(n, parent=None, z=0):
         b = n.get("bounds") or {}
+        x = round(b.get("left", 0), 2)
+        y = round(b.get("top", 0), 2)
+        w = round(b.get("width", 0), 2)
+        h = round(b.get("height", 0), 2)
+        # 导出器会给镜像变换的节点负宽高：把原点折回左上，尺寸取正
+        mirrored = False
+        if w < 0:
+            x = round(x + w, 2)
+            w = -w
+            mirrored = True
+        if h < 0:
+            y = round(y + h, 2)
+            h = -h
+            mirrored = True
+        fills = _fills(n)
         node = {
             "id": (n.get("basic") or {}).get("id"),
             "name": (n.get("basic") or {}).get("name", ""),
             "kind": (n.get("basic") or {}).get("realType", "UNKNOWN"),
             "semantic": (n.get("basic") or {}).get("type"),
             "opacity": (n.get("basic") or {}).get("opacity", 1),
-            "x": round(b.get("left", 0), 2),
-            "y": round(b.get("top", 0), 2),
-            "w": round(b.get("width", 0), 2),
-            "h": round(b.get("height", 0), 2),
+            "x": x,
+            "y": y,
+            "w": w,
+            "h": h,
+            "mirrored": mirrored,
             "radius": _radius(n),
-            "fill": [_hex(_c(c)) for c in (n.get("fill") or {}).get("colors") or []],
+            "fill": [f["hex"] for f in fills if f.get("kind") == "solid" and f.get("hex")],
+            "fills": fills,
             "borders": _borders(n),
             "shadows": [
                 {
@@ -130,7 +181,8 @@ def normalize(raw):
             node["children"].append(walk(c, node, i))
         return node
 
-    root = walk(raw[0])
+    root_raw = raw[0] if isinstance(raw, list) else raw
+    root = walk(root_raw)
     return root
 
 
@@ -218,12 +270,15 @@ def infer_layout(node, tol):
 
     if len(rel) == 1:
         c = rel[0]
+        # 之前的判断是恒等式（pad.left 本来就由该子节点算出），没有信息量；
+        # 单子节点真正的区别是"纯包裹"还是"带内边距"
+        flush = all(abs(pad[k]) < 0.5 for k in ("top", "right", "bottom", "left"))
         return {
             "kind": "stack",
             "children": 1,
             "padding": pad,
             "evidence": [f"单子节点 @({c['rx']},{c['ry']}) {c['w']}x{c['h']}"],
-            "confidence": 1.0 if c["rx"] - border == pad["left"] else 0.7,
+            "confidence": 1.0 if flush else 0.9,
         }
 
     # 重叠 → 画布叠放（视觉稿里图标零件、背景装饰都是这种）
@@ -340,10 +395,14 @@ def infer_layout(node, tol):
     }
 
 
-def _uniform_size_ok(rel, nrow, ncol):
-    ws = _uniform([round(c["w"], 1) for c in rel])
-    hs = _uniform([round(c["h"], 1) for c in rel])
-    return ws and hs
+def derive_gutter(board_w, content_w, explicit=None):
+    """版心边距：优先显式值，其次按内容宽推导，最后按画板宽比例兜底（移动端不能再用 120）"""
+    if explicit is not None:
+        return explicit
+    inferred = round((board_w - min(content_w, 1680)) / 2)
+    if inferred > 0:
+        return inferred
+    return max(8, round(board_w * 0.04))
 
 
 # ---------------------------------------------------------------- 结构语义
@@ -666,7 +725,7 @@ def report(root, res, board_w, board_h, src, visibility=None):
 # ---------------------------------------------------------------- main
 
 
-def invariants(nodes):
+def invariants(nodes, board_w=None):
     """从 IR 里抽出"设计不变量"：直接对应 CSS token 的那组数字"""
     def num(v):
         return int(v) if isinstance(v, float) and v.is_integer() else v
@@ -692,7 +751,7 @@ def invariants(nodes):
     stacks.sort(key=lambda n: -len(n["children"]))
     gutters = Counter(n["x"] for _, n in nodes if n["w"] > 1000 and n["x"] < 400)
     return {
-        "boardGutter": num(gutters.most_common(1)[0][0]) if gutters else None,
+        "boardGutter": num(gutters.most_common(1)[0][0]) if gutters else derive_gutter(board_w or nodes[0][1]["w"], nodes[0][1]["w"]),
         "dominantGrid": {
             "cols": cols.most_common(1)[0][0] if cols else None,
             "gapX": gaps_x.most_common(1)[0][0] if gaps_x else None,
@@ -761,7 +820,7 @@ def main():
     root = normalize(raw)
     board_w = a.board or int(root["w"])
     board_h = int(root["h"])
-    gutter = a.gutter if a.gutter is not None else round((board_w - min(root["w"], 1680)) / 2) or 120
+    gutter = derive_gutter(board_w, root["w"], a.gutter)
 
     res = analyze(root, board_w, gutter, a.tol)
     nodes = res["nodes"]
@@ -815,7 +874,7 @@ def main():
     )
 
     json.dump(
-        invariants(nodes),
+        invariants(nodes, board_w),
         open(os.path.join(a.out, "invariants.json"), "w", encoding="utf-8"),
         ensure_ascii=False,
         indent=1,

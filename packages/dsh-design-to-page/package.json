@@ -1,6 +1,6 @@
 {
   "name": "dsh-design-to-page",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Design-to-page tools for DeepSeek Harness: annotation JSON to layout IR, CDP screenshots, native-2x pixel diff, and design measurements.",
   "type": "module",
   "main": "index.js",

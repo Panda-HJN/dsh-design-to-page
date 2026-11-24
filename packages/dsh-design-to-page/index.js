@@ -48,6 +48,18 @@ function findProjectConfig(startDir) {
   return {}
 }
 
+/** 用会话的工作目录，而不是 Host 进程的 cwd（会话可以 cd） */
+function resolveCwd(ctx, exec) {
+  try {
+    const wd = ctx.get('workingDirectory')
+    const dir = exec?.agent ? wd?.get?.(exec.agent) : undefined
+    if (dir) return dir
+  } catch {
+    /* 服务不存在时退回进程 cwd */
+  }
+  return process.cwd()
+}
+
 /** 按路由取页面级覆盖：同一项目不同页的画板尺寸/倍率可以不同 */
 function pageConfig(projectConfig, routePath) {
   const pages = projectConfig.pages ?? {}
@@ -209,7 +221,7 @@ function registerDesignIr(ctx, cfg) {
       ],
     },
     async execute(args, exec) {
-      const cwd = process.cwd()
+      const cwd = resolveCwd(ctx, exec)
       const out = resolve(cwd, args.out ?? 'design-ir')
       const projectConfig = findProjectConfig(dirname(resolve(cwd, args.source)))
       const python = resolvePython(cfg, args, projectConfig)
@@ -224,6 +236,7 @@ function registerDesignIr(ctx, cfg) {
         'design_ir',
       )
       const files = ['report.md', 'layout.json', 'instances.json', 'invariants.json', 'masks.json', 'semantics.json', 'ir.json', 'tree.txt']
+        .concat(args.png ? ['visibility.json'] : [])
         .map((f) => join(out, f))
       let invariants = {}
       try { invariants = JSON.parse(readFileSync(join(out, 'invariants.json'), 'utf8')) } catch { /* optional */ }
@@ -279,6 +292,16 @@ function registerDesignShot(ctx, cfg) {
         select: { type: 'array', items: { type: 'string' }, description: '要采集盒模型的 CSS 选择器' },
         json: { type: 'string', description: 'JSON 输出路径，默认与截图同名的 .json' },
         page: { type: 'string', description: '路由路径，用于取 .design-to-page.json 里 pages 的页面级覆盖；缺省按 url 推导' },
+        storageState: {
+          type: 'string',
+          description:
+            '登录态文件（Playwright storageState 格式，含 cookies / origins.localStorage）。仅用于需要登录的页面；不传则只适合免登录页面',
+        },
+        block: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '要屏蔽的资源 URL 模式（CDP setBlockedURLs），例如 "*alicdn.com*"；用于内网不可达的外部脚本',
+        },
       },
     },
     output: {
@@ -307,7 +330,7 @@ function registerDesignShot(ctx, cfg) {
       ],
     },
     async execute(args, exec) {
-      const cwd = process.cwd()
+      const cwd = resolveCwd(ctx, exec)
       const target = resolve(cwd, args.out)
       const projectConfig = findProjectConfig(dirname(target))
       let routePath = args.page ?? ''
@@ -319,18 +342,27 @@ function registerDesignShot(ctx, cfg) {
       if (!browser) throw new Error('没有找到 Chromium 内核浏览器；在 .design-to-page.json 里配置 browserPath')
       const out = resolve(cwd, args.out)
       const json = args.json ? resolve(cwd, args.json) : out.replace(/\.png$/i, '') + '.json'
+      // 高度必须与画板一致；宁可直接报错，也不要静默截 1080 让后面的 diff 报尺寸不符
+      const heightPx = args.height ?? pageCfg.boardHeight
+      if (heightPx == null) {
+        throw new Error(
+          '缺少画板高度：请传 height，或在 .design-to-page.json 里配置 boardHeight（多页项目用 pages.<route>.boardHeight）',
+        )
+      }
       const argv = [
         join(SCRIPTS, 'design_shot.mjs'),
         `--url=${args.url}`,
         `--out=${out}`,
         `--json=${json}`,
         `--width=${args.width ?? pageCfg.boardWidth ?? 1920}`,
-        `--height=${args.height ?? pageCfg.boardHeight ?? 1080}`,
+        `--height=${heightPx}`,
         `--dpr=${args.dpr ?? pageCfg.pngScale ?? 2}`,
         `--browser=${browser}`,
         `--port=${9400 + Math.floor(Math.random() * 500)}`,
       ]
       if (args.clip) argv.push(`--clip=${args.clip}`)
+      if (args.storageState) argv.push('--storage-state', resolve(cwd, args.storageState))
+      for (const b of args.block ?? []) argv.push('--block', b)
       if (args.wait) argv.push(`--wait=${args.wait}`)
       if (args.expectPath) argv.push(`--expect-path=${args.expectPath}`)
       for (const s of args.select ?? []) argv.push(`--select=${s}`)
@@ -383,6 +415,7 @@ function registerDesignDiff(ctx, cfg) {
         failOver: { type: 'number', description: '>40 百分比阈值，超过则失败（门禁用）' },
         failMae: { type: 'number', description: 'MAE 阈值，超过则失败' },
         page: { type: 'string', description: '路由路径，用于取 .design-to-page.json 里 pages 的页面级覆盖' },
+        strictScale: { type: 'boolean', description: '默认 true：ref 宽/画板宽 必须是整数倍，否则报错。设为 false 才允许缩放比对' },
         noHeat: { type: 'boolean', description: '不生成热力图' },
       },
     },
@@ -414,7 +447,7 @@ function registerDesignDiff(ctx, cfg) {
       ],
     },
     async execute(args, exec) {
-      const cwd = process.cwd()
+      const cwd = resolveCwd(ctx, exec)
       const out = resolve(cwd, args.out ?? 'design-ir')
       const projectConfig = findProjectConfig(dirname(resolve(cwd, args.ref)))
       const pageCfg = pageConfig(projectConfig, args.page)
@@ -433,6 +466,7 @@ function registerDesignDiff(ctx, cfg) {
       if (args.noHeat) argv.push('--no-heat')
       if (args.failOver !== undefined) argv.push('--fail-over', String(args.failOver))
       if (args.failMae !== undefined) argv.push('--fail-mae', String(args.failMae))
+      if (args.strictScale === false) argv.push('--allow-scale')
       const res = await run(python, argv, { cwd, timeoutMs: cfg.timeoutMs ?? 180000, env: { DSH_TOOL: 'design_diff' } })
       // exit 1 在设置阈值时表示"未达标"，仍要把指标带回去
       if (res.code !== 0 && res.code !== 1) ensureOk(res, 'design_diff')
@@ -475,6 +509,7 @@ function registerDesignMeasure(ctx, cfg) {
         avg: { type: 'array', items: { type: 'string' }, description: '"名字@x,y,w,h"' },
         out: { type: 'string', description: '输出目录' },
         designWidth: { type: 'number', description: '设计宽，默认 1920' },
+        resample: { type: 'string', enum: ['nearest', 'lanczos'], description: '放大采样：nearest 看 1px 更准（默认），lanczos 更平滑' },
       },
     },
     output: {
@@ -500,7 +535,7 @@ function registerDesignMeasure(ctx, cfg) {
       ],
     },
     async execute(args, exec) {
-      const cwd = process.cwd()
+      const cwd = resolveCwd(ctx, exec)
       const projectConfig = findProjectConfig(dirname(resolve(cwd, args.design)))
       const python = resolvePython(cfg, args, projectConfig)
       const out = resolve(cwd, args.out ?? join(projectConfig.irOut ?? 'design-ir', 'measure'))
@@ -515,6 +550,7 @@ function registerDesignMeasure(ctx, cfg) {
       for (const p of args.pair ?? []) argv.push('--pair', p)
       for (const s of args.sample ?? []) argv.push('--sample', s)
       for (const s of args.avg ?? []) argv.push('--avg', s)
+      if (args.resample) argv.push('--resample', args.resample)
       const res = ensureOk(
         await run(python, argv, { cwd, timeoutMs: cfg.timeoutMs ?? 180000, env: { DSH_TOOL: 'design_measure' } }),
         'design_measure',
