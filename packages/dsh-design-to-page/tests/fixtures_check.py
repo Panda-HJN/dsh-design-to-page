@@ -35,6 +35,44 @@ def fixture(root_is_list=True):
         "text": {},
         "children": [],
     }
+    # 贴着画板外沿、但子树里有文本 —— 不能算装饰（旧实现的典型误报）
+    text_box = {
+        "basic": {"id": "n3", "name": "HeaderLike", "realType": "FRAME", "type": "shape"},
+        "bounds": {"left": 0, "top": 10, "width": 300, "height": 60},
+        "fill": {"colors": []},
+        "stroke": {"borders": [], "radius": []},
+        "text": {},
+        "children": [
+            {
+                "basic": {"id": "n3t", "name": "Title", "realType": "TEXT", "type": "text"},
+                "bounds": {"left": 8, "top": 18, "width": 120, "height": 20},
+                "text": {"styles": [{"value": "Title", "font": {"family": "Inter", "weight": "Regular", "size": 14,
+                                 "color": {"type": "normal", "value": {"r": 0, "g": 0, "b": 0, "a": 1}}},
+                                 "space": {"lineHeight": 20}}]},
+                "fill": {"colors": []},
+                "stroke": {"borders": [], "radius": []},
+                "children": [],
+            }
+        ],
+    }
+    # 真装饰：贴边、无文本、icon-like、半透明
+    decor = {
+        "basic": {"id": "n4", "name": "DecorIcon", "realType": "FRAME", "type": "shape", "opacity": 0.6},
+        "bounds": {"left": 0, "top": 700, "width": 90, "height": 90},
+        "fill": {"colors": []},
+        "stroke": {"borders": [], "radius": []},
+        "text": {},
+        "children": [
+            {
+                "basic": {"id": "n4v", "name": "Vector", "realType": "VECTOR", "type": "shape"},
+                "bounds": {"left": 5, "top": 705, "width": 80, "height": 80},
+                "fill": {"colors": [{"type": "normal", "value": {"r": 200, "g": 200, "b": 200, "a": 1}}]},
+                "stroke": {"borders": [], "radius": []},
+                "text": {},
+                "children": [],
+            }
+        ],
+    }
     gradient = {
         "basic": {"id": "n2", "name": "Gradient", "realType": "FRAME", "type": "shape"},
         "bounds": {"left": 0, "top": 0, "width": 300, "height": 200},
@@ -66,7 +104,7 @@ def fixture(root_is_list=True):
         "fill": {"colors": []},
         "stroke": {"borders": [], "radius": []},
         "text": {},
-        "children": [gradient],
+        "children": [gradient, text_box, decor],
     }
     return [root] if root_is_list else root
 
@@ -100,6 +138,17 @@ def main():
         # 375 宽画板不能再用 120 版心
         ("移动端版心", json.load(open(os.path.join(out, "invariants.json"), encoding="utf-8"))["boardGutter"] < 60),
     ]
+
+    deco = [s for s in json.load(open(os.path.join(out, "masks.json"), encoding="utf-8"))["slots"]
+            if s["kind"] == "decoration"]
+    checks.append(("装饰只认真装饰（含文本的容器不算）", len(deco) == 1 and abs(deco[0]["w"] - 90) < 1))
+
+    # 策略 background：装饰不再进遮罩
+    out_bg = os.path.join(tmp, "ir-bg")
+    run([os.path.join(SCRIPTS, "design_ir.py"), src, "--out", out_bg, "--decor", "background"])
+    deco_bg = [s for s in json.load(open(os.path.join(out_bg, "masks.json"), encoding="utf-8"))["slots"]
+               if s["kind"] == "decoration"]
+    checks.append(("decor=background 时不遮装饰", len(deco_bg) == 0))
     for label, passed in checks:
         print(("PASS " if passed else "FAIL ") + label)
         ok = ok and passed

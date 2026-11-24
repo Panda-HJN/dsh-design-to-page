@@ -1,5 +1,7 @@
 # Design to page
 
+> **0.0.3** rewrites decoration detection (subtree text, icon-like, not a full background, parent/child dedupe), adds a `decor: skip|background|alpha` strategy (default `skip` = do not draw, mask instead), and makes `design_diff` report an unusable screenshot instead of metrics when the capture is nearly blank or globally wrong.
+>
 > **0.0.2** fixes P0 (diff shift search 50s → ~2s, non-ASCII file names, required height, session cwd, one border formula in the skill, non-integer scale rejection)
 > and P1 (negative/mirrored bounds, gradients, object root, readyState-based waiting, `--block`, mobile gutter, opt-in `--storage-state`).
 Turn a design export (PNG + coordinate annotation JSON) into a maintainable page, with a measurable pixel loop instead of "look at a picture and write markup".

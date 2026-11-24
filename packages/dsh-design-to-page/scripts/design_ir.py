@@ -503,7 +503,7 @@ def visibility_check(nodes, png_path, scale):
     return out
 
 
-def analyze(root, board_w, gutter, tol):
+def analyze(root, board_w, board_h, gutter, tol):
     visual_sort(root)
     nodes = collect(root, [])
     for _, n in nodes:
@@ -567,16 +567,51 @@ def analyze(root, board_w, gutter, tol):
         if not n["children"] and not n["texts"] and not n["fill"] and not n["borders"]:
             empty.append(n)
 
-    # 装饰候选：贴着画板外沿 / 只含图标且无文本 / 低透明度
+    # 装饰候选：贴着画板外沿、icon-like、无任何文本后代、且不是整块背景层。
+    # 旧实现只看直接 texts，导致整块画板/导航/Header 都被当成装饰（实测 16 条里 5 条误报）。
+    def has_text_or_image(n):
+        if n["texts"] or n.get("semantic") == "image":
+            return True
+        return any(has_text_or_image(c) for c in n["children"])
+
+    def rect_contains(a, b):
+        return (
+            a["x"] <= b["x"] + 0.5
+            and a["y"] <= b["y"] + 0.5
+            and a["x"] + a["w"] >= b["x"] + b["w"] - 0.5
+            and a["y"] + a["h"] >= b["y"] + b["h"] - 0.5
+        )
+
+    board_area = board_w * board_h
     deco = []
     for depth, n in nodes:
-        if n["w"] < 8 or n["h"] < 8:
+        if n is root or n["w"] < 8 or n["h"] < 8:
+            continue
+        if has_text_or_image(n):
+            continue
+        # 横跨半个画板以上的，是背景层而不是浮层装饰
+        if max(n["w"], n["h"]) > board_w * 0.5:
+            continue
+        if n["w"] * n["h"] > board_area * 0.25:
             continue
         edge = n["x"] < gutter * 0.6 or n["x"] + n["w"] > board_w - gutter * 0.6
-        if n["children"] and not n["texts"] and edge and n["w"] * n["h"] > 4000:
-            deco.append((n, "贴画板外沿且无文本"))
-        elif 0 < n["opacity"] < 1 and n["w"] * n["h"] > 4000:
-            deco.append((n, "低透明度"))
+        icon_like = max(n["w"], n["h"]) <= 200 and (
+            n["kind"] in ("VECTOR", "BOOLEAN_OPERATION", "GROUP")
+            or (n["children"] and all(c["kind"] in ("VECTOR", "BOOLEAN_OPERATION") for c in n["children"]))
+        )
+        low_opacity = 0 < n["opacity"] < 1
+        if (edge and icon_like) or low_opacity:
+            deco.append((n, "贴边 icon-like 且无文本" if edge and icon_like else "低透明度"))
+
+    # 父子同时命中时只保留最外层：一件装饰往往被拆成多个矢量零件。
+    # 按面积从大到小贪心保留——父子矩形完全相同的样本（导出器常见）不会互相抵消。
+    deco.sort(key=lambda p: (p[0]["w"] * p[0]["h"], -p[0]["y"], -p[0]["x"]), reverse=True)
+    kept = []
+    for n, why in deco:
+        if any(rect_contains(k, n) for k, _ in kept):
+            continue
+        kept.append((n, why))
+    deco = kept
 
     return {
         "nodes": nodes,
@@ -634,7 +669,7 @@ def tree_lines(root):
     return lines
 
 
-def report(root, res, board_w, board_h, src, visibility=None):
+def report(root, res, board_w, board_h, src, visibility=None, decor="skip"):
     nodes = res["nodes"]
     kinds = Counter(n["kind"] for _, n in nodes)
     L = []
@@ -697,9 +732,18 @@ def report(root, res, board_w, board_h, src, visibility=None):
     A(f"- 图标簇：{len(res['icons'])}（≤48px 且只含矢量）")
     A(f"- 空容器（无填充/文字/边框，可能是图片槽或占位）：{len(res['empty'])}")
 
-    A("\n## 装饰候选（需人/模型确认）\n")
+    A("\n## 装饰件\n")
+    strategy_note = {
+        "skip": "**skip**：不画装饰，diff 时遮罩（默认，适合人眼几乎看不见的线稿/光斑）",
+        "background": "**background**：由设计师导出一整张背景图，用 CSS background 铺满画板（不遮罩）",
+        "alpha": "**alpha**：抠出带 alpha 的透明图，按容器百分比定位（不遮罩）",
+    }[decor]
+    A(f"- 策略：{strategy_note}")
+    A("- 禁止做法：从不透明设计图上裁矩形 + 设计坐标绝对定位（会露出底色方块，且宽度变化即错位）")
     for n, why in res["decorations"][:10]:
         A(f"- {n['name']} @({n['x']},{n['y']}) {n['w']}×{n['h']} — {why}")
+    if not res["decorations"]:
+        A("- 未发现装饰件候选")
 
     if visibility:
         hidden = [v for v in visibility if not v["rendered"]]
@@ -812,6 +856,7 @@ def main():
     ap.add_argument("--board", type=int, default=None)
     ap.add_argument("--gutter", type=int, default=None)
     ap.add_argument("--tol", type=float, default=2.0)
+    ap.add_argument("--decor", choices=["skip", "background", "alpha"], default="skip", help="装饰处理策略：skip=不画并遮罩（默认），background/alpha=由页面绘制，不再遮罩")
     ap.add_argument("--png", default=None, help="设计图 PNG：核查文本是否真的渲染（隐藏图层检测）")
     ap.add_argument("--png-scale", type=float, default=None, help="PNG 相对画板的倍率，缺省按 PNG 宽/画板宽")
     a = ap.parse_args()
@@ -822,7 +867,7 @@ def main():
     board_h = int(root["h"])
     gutter = derive_gutter(board_w, root["w"], a.gutter)
 
-    res = analyze(root, board_w, gutter, a.tol)
+    res = analyze(root, board_w, board_h, gutter, a.tol)
     nodes = res["nodes"]
 
     os.makedirs(a.out, exist_ok=True)
@@ -856,11 +901,12 @@ def main():
 
     open(os.path.join(a.out, "tree.txt"), "w", encoding="utf-8").write("\n".join(tree_lines(root)))
     open(os.path.join(a.out, "report.md"), "w", encoding="utf-8").write(
-        report(root, res, board_w, board_h, a.source, visibility)
+        report(root, res, board_w, board_h, a.source, visibility, a.decor)
     )
 
     masks = [{"x": n["x"], "y": n["y"], "w": n["w"], "h": n["h"], "kind": "image"} for n in res["images"]]
-    masks += [{"x": n["x"], "y": n["y"], "w": n["w"], "h": n["h"], "kind": "decoration"} for n, _ in res["decorations"]]
+    if a.decor == "skip":
+        masks += [{"x": n["x"], "y": n["y"], "w": n["w"], "h": n["h"], "kind": "decoration"} for n, _ in res["decorations"]]
     json.dump({"slots": masks}, open(os.path.join(a.out, "masks.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
 
     json.dump(

@@ -8,7 +8,7 @@ DSH（DeepSeek Harness）bundle：设计导出物（PNG + 坐标标注 JSON）�
 
 ```bash
 # 从 npm
-plugin_manager install_bundle target=dsh-design-to-page@0.0.2
+plugin_manager install_bundle target=dsh-design-to-page@0.0.3
 
 # 或从本地目录
 plugin_manager install_bundle target=/abs/path/to/dsh-design-to-page

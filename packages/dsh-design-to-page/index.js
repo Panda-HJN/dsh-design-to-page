@@ -188,6 +188,12 @@ function registerDesignIr(ctx, cfg) {
         tolerance: { type: 'number', description: '行列聚类容差（设计 px），默认 2' },
         png: { type: 'string', description: '设计图 PNG：核查每个文本节点是否真的渲染，用于发现隐藏图层' },
         pngScale: { type: 'number', description: 'PNG 相对画板的倍率，缺省按 PNG 宽/画板宽' },
+        decor: {
+          type: 'string',
+          enum: ['skip', 'background', 'alpha'],
+          description:
+            '装饰件策略，默认 skip（不画并遮罩）。background/alpha 表示由页面绘制、不再遮罩。禁止"不透明矩形 + 设计坐标"',
+        },
       },
     },
     output: {
@@ -231,6 +237,7 @@ function registerDesignIr(ctx, cfg) {
       if (args.tolerance) argv.push('--tol', String(args.tolerance))
       if (args.png) argv.push('--png', resolve(cwd, args.png))
       if (args.pngScale) argv.push('--png-scale', String(args.pngScale))
+      argv.push('--decor', args.decor ?? projectConfig.decor ?? 'skip')
       const res = ensureOk(
         await run(python, argv, { cwd, timeoutMs: cfg.timeoutMs ?? 180000, env: { DSH_TOOL: 'design_ir' } }),
         'design_ir',

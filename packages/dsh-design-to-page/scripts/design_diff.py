@@ -152,6 +152,24 @@ def main():
     mae_all, p10_all, p40_all = stat(ref, shot, None)
     print(f"MAE {mae:.2f}  >10 {p10:.2f}%  >40 {p40:.2f}%   (全图 MAE {mae_all:.2f} / >40 {p40_all:.2f}%)")
 
+    def color_variety(arr):
+        """量化后统计颜色多样性：空白/错误页几乎是单色"""
+        q = arr[::8, ::8].reshape(-1, 3) // 16
+        return int(len(np.unique(q, axis=0)))
+
+    variety = color_variety(shot)
+    ref_variety = color_variety(ref)
+
+    # 截图有效性：整页几乎全错、或几乎是单色，通常不是"还原得差"，
+    # 而是截图不是目标页面（HMR 中途、Vite 错误浮层、路由跳走、服务重启）
+    if p40 > 60 or mae > 50 or (variety < 8 and ref_variety > 32):
+        sys.stderr.write(
+            f"截图不可用：MAE {mae:.1f} / >40 {p40:.1f}% / 颜色数 {variety}（设计图 {ref_variety}）说明这张图不是目标页面"
+            "（HMR 未完成、错误浮层、路由跳走或服务重启）。请重新截图后再比。\n"
+        )
+        sys.stderr.write("本次不产出 metrics.json 与热力图，避免把无效截图当成门禁结果。\n")
+        return EXIT_USAGE
+
     # 位移搜索在原生分辨率上做（精度 = 1 PNG px），抽样提速
     radius_px = max(1, round(a.shift * scale))
     dx, dy, _ = shift_search(ref, shot, radius_px)
